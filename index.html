@@ -412,7 +412,7 @@ tr.inb td{background:var(--bg)}
     </section>
     <section id="v-master" hidden>
       <div class="card"><h2>Export the NAP master</h2>
-        <p class="hint" style="margin:0 0 10px">One row per NAP box: the master columns you can edit and import back, plus the computed status (read-only). Deactivated NAPs are listed with status <b>inactive</b> and active <b>NO</b>; this export is the only place they appear.</p>
+        <p class="hint" style="margin:0 0 10px">One row per NAP box: the master columns you can edit and import back, plus the computed status and the port remarks (read-only, column <b>port_remarks</b>; ignored when the file is imported back). Deactivated NAPs are listed with status <b>inactive</b> and active <b>NO</b>; this export is the only place they appear.</p>
         <div class="row">
           <label class="meta">Scope <select id="mxScope" aria-label="Export scope"></select></label>
           <label class="meta"><input type="checkbox" id="mxInactive" checked> Include deactivated NAPs</label>
@@ -454,11 +454,11 @@ tr.inb td{background:var(--bg)}
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
-<script src="nap-core.js?v=2026-10-22.4"></script>
-<script src="nap-api.js?v=2026-10-22.4"></script>
+<script src="nap-core.js?v=2026-10-22.5"></script>
+<script src="nap-api.js?v=2026-10-22.5"></script>
 <script>
 'use strict';
-var NAP_DASH_VERSION = '2026-10-22.4';   // bump with every deploy (version-stamp rule, see AHBA_FieldOps_Handoff.md)
+var NAP_DASH_VERSION = '2026-10-22.5';   // bump with every deploy (version-stamp rule, see AHBA_FieldOps_Handoff.md)
 // Same Supabase project as the console and FMS. Confirm these two values equal the console's ahba-cloud.js before deploy (Task 11).
 var SB_URL = 'https://avjzkfxgzeyxtihkofed.supabase.co';
 var SB_KEY = 'sb_publishable_2JM51zp2r5GUICznc6Nz4Q_B4UFS1da';
@@ -1777,7 +1777,8 @@ var MM_ST = { 'new': ['new', 'p-ok'], update: ['update', 'p-upd'], unchanged: ['
 var MM_APPLY = { 'new': 1, update: 1, deactivate: 1, reactivate: 1 };
 var MM_SHOW_MAX = 1000;
 var MX_WIDTHS = { stencil: 26, barangay: 24, district: 10, dwelling: 10, street: 28, olt: 14, lat: 12, lng: 12, geo_source: 12, geo_updated_at: 18, np_numbers: 12,
-                  total_ports: 12, status: 13, checked_ports: 14, free_ports: 12, bad_ports: 10, age_days: 10, last_audit_at: 18, last_audit_team: 16, converge_available: 18, active: 8 };
+                  total_ports: 12, status: 13, checked_ports: 14, free_ports: 12, bad_ports: 10, age_days: 10, last_audit_at: 18, last_audit_team: 16, converge_available: 18, active: 8,
+                  port_remarks: 60 };
 function mxMsg(t) { $('mxMsg').textContent = t || ''; }
 function mmMsg(t) { $('mmMsg').textContent = t || ''; }
 function mmProg(t) { $('mmProg').textContent = t || ''; }
@@ -1810,9 +1811,10 @@ async function mxRun(kind) {
       mxMsg('Building the file (' + fmtN(rows.length) + ' rows)…');
       await new Promise(function (r) { setTimeout(r, 30); });   // let the message paint before the (synchronous) file build
       if (job.cancel) throw CANCEL();
-      var cells = rows.map(C.masterExportCells);
+      var cols = C.masterExportCols(rows);   // + port_remarks when the database sends it (phase 13), else the 21 columns as before
+      var cells = rows.map(function (r) { return C.masterExportCells(r, cols); });
       name = C.masterFileName(scope || 'whole-qc', kind);
-      saveBlob(new Blob(['\ufeff' + C.toCsv(C.MASTER_EXPORT_COLS, cells, C.MASTER_NUMERIC)], { type: 'text/csv;charset=utf-8' }), name);
+      saveBlob(new Blob(['\ufeff' + C.toCsv(cols, cells, C.MASTER_NUMERIC)], { type: 'text/csv;charset=utf-8' }), name);
       n = rows.length; off = rows.filter(function (r) { return r.active === 'NO'; }).length;
       rows = cells = null;
     } else {
@@ -1823,7 +1825,8 @@ async function mxRun(kind) {
   } catch (e) { mxMsg(e && e.code === 'NAP_CANCELLED' ? 'Export cancelled.' : 'Cannot export: ' + msgOf(e)); }
   finally { if (job.x) { job.x.close(); job.x = null; } mx.busy = false; mxLock(false); }
 }
-// .xlsx: each page of 1,000 boxes becomes cells here and goes to the builder (the worker) at once; a failed worker = one more run on the page
+// .xlsx: each page of 1,000 boxes becomes cells here and goes to the builder (the worker) at once; a failed worker = one more run on the page.
+// The builder opens on the FIRST page: its columns come from the rows (port_remarks only when the database sends it, phase 13 / nap-22).
 async function mxXlsx(scope, label, inc, job) {
   var CANCEL = function () { return Object.assign(new Error('cancelled'), { code: 'NAP_CANCELLED' }); };
   for (var attempt = 0; ; attempt++) {
@@ -1836,15 +1839,25 @@ async function mxXlsx(scope, label, inc, job) {
       mxMsg(t + (job.fallback ? XLSX_FREEZE : ''));
     };
     job.onProgress = function (p) { if (p.phase === 'rows') added = p.rows; else phase = 'write'; say(); };
-    mxMsg('Loading the Excel writer…');
-    try { await xlsxJob({ sheet: 'EXPORT', head: C.MASTER_EXPORT_COLS, cols: C.MASTER_EXPORT_COLS.map(function (c) { return { wch: MX_WIDTHS[c] || 12 }; }) }, job); }
-    catch (e) { if (job.cancel) throw CANCEL(); throw new Error('Cannot load the Excel writer; use .csv'); }
-    if (job.cancel) throw CANCEL();
-    mxMsg('Exporting ' + label + '…' + (job.fallback ? XLSX_FREEZE : ''));
+    var cols = null;
+    var openX = async function (c) {
+      cols = c;
+      mxMsg('Loading the Excel writer…');
+      try { await xlsxJob({ sheet: 'EXPORT', head: cols, cols: cols.map(function (k) { return { wch: MX_WIDTHS[k] || 12 }; }) }, job); }
+      catch (e) { if (job.cancel) throw CANCEL(); throw new Error('Cannot load the Excel writer; use .csv'); }
+      if (job.cancel) throw CANCEL();
+      say();
+    };
+    mxMsg('Exporting ' + label + '…');
     try {
       var n = await api.exportBoxesAll({ barangay: scope || null, includeInactive: inc, cancelled: function () { return job.cancel; },
         onPage: function (k) { fetched = k; say(); },
-        onRows: function (rows) { rows.forEach(function (r) { if (r.active === 'NO') off++; }); return job.x.add(rows.map(C.masterExportCells)); } });
+        onRows: async function (rows) {
+          if (!job.x) await openX(C.masterExportCols(rows));
+          rows.forEach(function (r) { if (r.active === 'NO') off++; });
+          return job.x.add(rows.map(function (r) { return C.masterExportCells(r, cols); }));
+        } });
+      if (!job.x) await openX(C.MASTER_EXPORT_COLS_V1.slice());   // no rows: the header only
       phase = 'build'; say();
       if (job.x.mode() === 'main') { phase = 'write'; say(); await new Promise(function (r) { setTimeout(r, 30); }); }   // paint before the synchronous build
       if (job.cancel) throw CANCEL();
