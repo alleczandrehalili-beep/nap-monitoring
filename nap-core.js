@@ -1114,8 +1114,29 @@
     };
   }
 
+  // Board map navigation (dashboard 2026-10-24.1): Expand map memory, Locate me view and messages. The position never leaves the browser.
+  var MAPNAV = {
+    KEY: 'ahba-nap-mapx',   // sessionStorage: '1' = the Board map was expanded
+    LOCATE_FIT_M: 300,      // accuracy above this: fit the accuracy circle instead of zooming in on a guess
+    LOCATE_ZOOM: 17,
+    restore: function (v) { return v === '1'; },
+    locateView: function (acc, zoom) {
+      var a = Number(acc);
+      if (isFinite(a) && a > MAPNAV.LOCATE_FIT_M) return { fit: true, radius: Math.min(a, 20000) };
+      return { fit: false, zoom: Math.max(Number(zoom) || 0, MAPNAV.LOCATE_ZOOM) };
+    },
+    locateMsg: function (acc) {
+      var a = Number(acc);
+      return 'Showing your location' + (isFinite(a) && a > 0 ? ' (accuracy about ' + (a < 1000 ? Math.round(a) + ' m' : (Math.round(a / 100) / 10) + ' km') + ')' : '') + '. It is not sent anywhere.';
+    },
+    geoError: function (err) {
+      var c = err && err.code;
+      return c === 1 ? 'Location permission denied: allow location for this site to use Locate me.' : c === 3 ? 'Locating timed out. Try again.' : 'Cannot get your location. Try again.';
+    }
+  };
+
   return {
-    p12: P12,
+    p12: P12, mapNav: MAPNAV,
     desk: DESK, AUDIT_KINDS: AUDIT_KINDS, AUDIT_KIND_LABEL: AUDIT_KIND_LABEL, AUDIT_PAGE: AUDIT_PAGE, AUDIT_EXPORT_PAGE: AUDIT_EXPORT_PAGE, AUDIT_EXPORT_MAX: AUDIT_EXPORT_MAX,
     AUDIT_STREET_MIN: AUDIT_STREET_MIN, AUDIT_MAXLEN: AUDIT_MAXLEN, auditFilterDefaults: auditFilterDefaults, auditFilterParams: auditFilterParams, auditNewFilters: auditNewFilters,
     auditFilterSummary: auditFilterSummary, auditCursor: auditCursor, auditExportName: auditExportName, fmtManila: fmtManila, AUDIT_EXPORT_COLS: AUDIT_EXPORT_COLS,
