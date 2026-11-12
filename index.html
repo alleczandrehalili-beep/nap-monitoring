@@ -199,6 +199,7 @@ tr.inb td{background:var(--bg)}
 .dk-row select{flex:1 1 170px;min-width:0}
 .dk-row input{font:inherit;font-family:var(--mono);padding:6px 8px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink);flex:1 1 150px;min-width:0}
 .dk-row input.dk-bad{border-color:var(--full)}
+.dk-row input[data-dk-a]{text-transform:uppercase}
 .dk-row .dk-m{grid-column:2;font-size:11.5px;color:var(--full)}
 .dk-row .dk-was{grid-column:2;font-size:11.5px;color:var(--muted)}
 .dk-reason{display:block;width:100%;margin-top:8px;font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink)}
@@ -670,7 +671,7 @@ body.tm-open .toast{z-index:31}
           <label>Barangay<select id="p14Brgy" aria-label="Barangay"></select></label>
           <label>Stage<select id="p14Stage" aria-label="Stage"></select></label>
           <label>Port status<select id="p14Status" aria-label="Port status"></select></label>
-          <label>NAP stencil or 13-digit account<input type="search" id="p14Q" maxlength="80" placeholder="contains… or 1878702…" autocomplete="off" enterkeyhint="search" aria-label="NAP stencil or account number"></label>
+          <label>NAP stencil or 13-character account label<input type="search" id="p14Q" maxlength="80" placeholder="contains… or a 13-character label" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="search" aria-label="NAP stencil or account label"></label>
           <label class="ckl"><input type="checkbox" id="p14Pds"> PDS only</label>
         </div>
         <div class="row"><button class="btn sm" id="p14Clear" type="button">Clear filters</button><span class="meta" id="p14Sum" role="status" aria-live="polite"></span></div>
@@ -691,11 +692,11 @@ body.tm-open .toast{z-index:31}
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
-<script src="nap-core.js?v=2026-11-12.1"></script>
-<script src="nap-api.js?v=2026-11-12.1"></script>
+<script src="nap-core.js?v=2026-11-12.2"></script>
+<script src="nap-api.js?v=2026-11-12.2"></script>
 <script>
 'use strict';
-var NAP_DASH_VERSION = '2026-11-12.1';   // bump with every deploy (version-stamp rule, see AHBA_FieldOps_Handoff.md)
+var NAP_DASH_VERSION = '2026-11-12.2';   // bump with every deploy (version-stamp rule, see AHBA_FieldOps_Handoff.md)
 // Same Supabase project as the console and FMS. Confirm these two values equal the console's ahba-cloud.js before deploy (Task 11).
 var SB_URL = 'https://avjzkfxgzeyxtihkofed.supabase.co';
 var SB_KEY = 'sb_publishable_2JM51zp2r5GUICznc6Nz4Q_B4UFS1da';
@@ -2727,7 +2728,7 @@ function deskRender(slot) {
   for (var n = 1; n <= 8; n++) {
     var ed = e.edits[n], was = curBy[n];
     rows += '<div class="dk-row" data-dk-p="' + n + '"><b>P' + n + '</b><div class="dk-f"><select aria-label="P' + n + ' status" data-dk-s="' + n + '">' + deskStatusOpts(ed.status) + '</select>' +
-      '<input type="text" inputmode="numeric" autocomplete="off" maxlength="40" placeholder="13-digit account no." aria-label="P' + n + ' account number" data-dk-a="' + n + '" value="' + esc(ed.tag_acct) + '"' + (ed.status === S.AWT ? '' : ' hidden') + '></div>' +
+      '<input type="text" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" autocomplete="off" maxlength="40" placeholder="' + esc(C.acct.PLACEHOLDER) + '" title="' + esc(C.acct.HINT) + '" aria-label="P' + n + ' account label (13 letters or numbers)" data-dk-a="' + n + '" value="' + esc(ed.tag_acct) + '"' + (ed.status === S.AWT ? '' : ' hidden') + '></div>' +
       '<div class="dk-was">Now: ' + esc(was ? was.status : 'no reading') + (was && was.tag_acct ? ' · ' + esc(was.tag_acct) : '') + '</div><div class="dk-m" data-dk-m="' + n + '"></div></div>';
   }
   slot.innerHTML = '<div class="dk-ed" role="group" aria-label="Edit NP' + esc(e.np) + ' ports"><div class="meta"><b>Desk update of NP' + esc(e.np) + '</b>: change only what you know is wrong. ' +
@@ -2770,7 +2771,7 @@ async function deskSave(slot) {
   catch (x) {
     e.busy = false;
     if (DK.edit !== e) { toast('Desk update not saved: ' + msgOf(x)); return; }
-    e.err = 'Not saved: ' + msgOf(x);
+    e.err = 'Not saved: ' + (C.acct.olderServer(x, v.changed.map(function (p) { return p.tag_acct; })) || msgOf(x));   // phase 19: a database without nap-27
     if (/NAP_FORBIDDEN/.test(String(x && x.code || x && x.message || ''))) { DK.on = false; DK.edit = null; toast(e.err); drawDetail(true); return; }
     deskRefresh(slot); toast(e.err); return;
   }
@@ -2807,7 +2808,7 @@ $('detail').addEventListener('click', function (ev) {
 function deskInput(ev) {
   var t = ev.target, slot = t.closest('.dk-slot'), e = DK.edit; if (!slot || !e || e.busy) return;
   if (t.hasAttribute('data-dk-s')) { var n = +t.getAttribute('data-dk-s'); e.edits[n].status = t.value; if (t.value === S.AWT) setTimeout(function () { var a = slot.querySelector('[data-dk-a="' + n + '"]'); if (a) a.focus(); }, 0); }
-  else if (t.hasAttribute('data-dk-a')) { var m = +t.getAttribute('data-dk-a'), clean = C.desk.normAcct(t.value); if (ev.type === 'change' || /[\s-]/.test(t.value) && ev.inputType === 'insertFromPaste') t.value = clean; e.edits[m].tag_acct = t.value; }
+  else if (t.hasAttribute('data-dk-a')) { var m = +t.getAttribute('data-dk-a'), clean = C.desk.normAcct(t.value); if (ev.type === 'change' || ev.inputType === 'insertFromPaste') t.value = clean; e.edits[m].tag_acct = t.value; }
   else if (t.hasAttribute('data-dk-r')) e.reason = t.value;
   else return;
   e.cid = null; e.err = '';   // the values changed: a new request id at the next Save
@@ -3427,7 +3428,7 @@ async function p12MasterWarn(prev, tok) {
 // Who (the server is the real guard; these only decide what to show), from nap.my_stage_access (null = a database without nap-23: nothing):
 //   stage: every Board reader SEES it (chip, legend, map letter, filter); Set stage (NAP without one) = board + NAP technicians (setting
 //          stage_set_roles); Move stage (change / clear) = admin / super, reason required.
-//   PDS:   mark = board + NAP technicians (pds_mark_roles) on a port with a 13-digit account; clear / "Validate and release" = admin / super.
+//   PDS:   mark = board + NAP technicians (pds_mark_roles) on a port with a 13-character account label; clear / "Validate and release" = admin / super.
 //   remarks: NAP technicians write them too when port_remark_roles allows (the phase 12 editor).
 //   Ports tab: dispatcher / admin / super (account numbers). Never written from a session handed over from the phone (view-only Board).
 // Labels / colours / letters / rules: NapCore.p14 (the single source). Everything from the server or the user is escaped. Saves keep one
@@ -3679,9 +3680,9 @@ function p14PdsRender(sec, b, ports) {
   }
   if (w && r.pdsMark && cand.length) {
     var mk = e && e.on;
-    h += mk ? p14PdsEditorHtml(e, cand) : '<div class="p14-row"><button class="btn sm" type="button" data-p14-mark>Mark a port PDS…</button><span class="meta">A port with its 13-digit account number whose IBAS account status is PDS.</span></div>';
+    h += mk ? p14PdsEditorHtml(e, cand) : '<div class="p14-row"><button class="btn sm" type="button" data-p14-mark>Mark a port PDS…</button><span class="meta">A port with its 13-character account label whose IBAS account status is PDS.</span></div>';
   } else if (w && r.pdsMark && !f.rows.length && (ports || []).some(function (p) { return p.status === S.AWT; })) {
-    h += '<div class="meta">To mark a port PDS, it needs its 13-digit account number first.</div>';
+    h += '<div class="meta">To mark a port PDS, it needs its 13-character account label (letters and numbers) first.</div>';
   }
   sec.innerHTML = h;
 }
@@ -3706,7 +3707,7 @@ async function p14PdsSave() {
   var kk = e.key.split(':'), res;
   try { res = await api.setPortPds(Q.pdsPayload({ clientId: e.cid, boxId: e.box_id, np: kk[0], port: kk[1], pds: e.on, note: e.note })); }
   catch (x) {
-    e.busy = false; e.err = 'Not saved: ' + msgOf(x);
+    e.busy = false; e.err = 'Not saved: ' + ((e.on && C.acct.olderServer(x, [e.acct])) || msgOf(x));   // phase 19: a database without nap-27
     if (/NAP_FORBIDDEN/.test(String(x && (x.code || x.message) || ''))) { P14S.pd = null; toast(e.err); p14Init(); if (state.sel) drawDetail(false); return; }
     toast(e.err); p14PdsRedraw(); return;
   }

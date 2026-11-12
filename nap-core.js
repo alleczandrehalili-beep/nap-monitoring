@@ -12,6 +12,53 @@
   var PORT_STATUSES = [STATUS.AWT, STATUS.AWO, STATUS.VACANT, STATUS.RELEASED, STATUS.HILOSS, STATUS.DEFECTIVE];
   var DEFAULTS = { freshnessDays: 14, fullMultiplier: 2, gpsFlagM: 50 };
 
+  // ======================================================================================================================
+  // ---------- phase 19: the ACCOUNT LABEL of an 'Active (w/ tagging)' port (nap-27). Self-contained; exported as NapCore.acct ----------
+  // Same rule as the server (nap.desk_update_ports / set_port_pds / list_ports / _desk_result; change them together), the dashboard and the phone:
+  //   INPUT: spaces, tabs and dashes ('-' and the Unicode dashes U+2010..U+2015, U+2212) are removed; what is left must be EXACTLY 13 of
+  //   A-Z / a-z / 0-9 (ASCII only: a Cyrillic or full-width look-alike is refused; checked BEFORE upper-casing, so no locale can turn a
+  //   look-alike into A-Z); it is saved UPPER-CASE. 13 digits stay valid exactly as before.
+  //   KEY (comparing a STORED label, also older spellings): letters and digits only, upper-case = upper(regexp_replace(x, '[^A-Za-z0-9]', '', 'g')).
+  var ACCT = (function () {
+    var LEN = 13, D = String.fromCharCode;
+    var SEP = new RegExp('[\\s' + D(0x2010) + '-' + D(0x2015) + D(0x2212) + '-]+', 'g');
+    function str(v) { return String(v == null ? '' : v); }
+    // ' abc-1234 567890 ' -> 'ABC1234567890'. Only ASCII a-z is upper-cased; anything else is kept as typed so that it fails the check.
+    function norm(s) { return str(s).replace(SEP, '').replace(/[a-z]+/g, function (m) { return m.toUpperCase(); }); }
+    function count(s) { return Array.from(s).length; }
+    // '' when the label is valid, else the message for the person typing it
+    function error(s) {
+      var a = norm(s);
+      if (!a) return 'Enter the 13-character account label (letters and numbers).';
+      if (!/^[A-Z0-9]+$/.test(a)) return 'Letters and numbers only.';
+      if (a.length !== LEN) return 'Exactly 13 characters (' + count(a) + ' entered).';
+      return '';
+    }
+    function valid(s) { return error(s) === ''; }
+    // the comparison KEY of a stored label (the server's index expression nap_ports_acct_key)
+    function key(s) { return str(s).replace(/[^A-Za-z0-9]+/g, '').toUpperCase(); }
+    function keyOk(s) { return /^[A-Z0-9]{13}$/.test(key(s)); }
+    // the Ports-tab search text: 13 digits (spaces / dashes allowed, as before) or 13 letters / numbers typed WITHOUT spaces = an account label
+    // (the value to send); anything else = part of a stencil (null). A stencil always has spaces, so 'QCY03 LP114 NP1' stays a stencil search.
+    function query(q) {
+      var t = str(q).trim(), n = t.replace(SEP, '');
+      if (/^[0-9]{13}$/.test(n)) return n;
+      if (!/\s/.test(t) && /^[A-Za-z0-9]{13}$/.test(n)) return n.toUpperCase();
+      return null;
+    }
+    function hasLetter(s) { return /[A-Za-z]/.test(norm(s)); }
+    // a save refused by a database WITHOUT phase 19 (it still answers NAP_TAG_FORMAT / NAP_PDS_NEEDS_ACCT for a label with letters): the readable
+    // message, or '' when the error is something else. labels = the label(s) of that save.
+    function olderServer(err, labels) {
+      var m = str(err && (err.message || err.code) || err);
+      if (!/NAP_TAG_FORMAT|NAP_PDS_NEEDS_ACCT/.test(m)) return '';
+      if (!(labels || []).some(function (l) { return hasLetter(l) && keyOk(l); })) return '';
+      return 'The database is not updated yet for account labels with letters: for now it accepts 13 digits only. Ask the system owner to apply the phase 19 update.';
+    }
+    return { LEN: LEN, norm: norm, error: error, valid: valid, key: key, keyOk: keyOk, query: query, hasLetter: hasLetter, olderServer: olderServer,
+             PLACEHOLDER: '13 letters / numbers', HINT: 'Exactly 13 letters or numbers (A-Z, 0-9). Spaces and dashes are removed; letters become capitals.' };
+  })();
+
   function opt(o) { var r = {}; for (var k in DEFAULTS) r[k] = (o && o[k] != null) ? o[k] : DEFAULTS[k]; return r; }
   function toMs(v) { return typeof v === 'number' ? v : v instanceof Date ? v.getTime() : Date.parse(v); }
   function isUsable(s) { return s === STATUS.VACANT || s === STATUS.RELEASED; }
@@ -113,6 +160,10 @@
       errors.push({ code: 'NAP_PORTS_INCOMPLETE', msg: 'Every port from P1 to P8 needs a status.' });
     var noTag = ports.filter(function (p) { return p.status === STATUS.AWT && !String(p.tag_acct || '').trim(); }).map(function (p) { return 'P' + p.port; });
     if (noTag.length) errors.push({ code: 'NAP_TAG_REQUIRED', msg: 'Enter the acct no. on the label of ' + noTag.join(', ') + '.' });
+    // phase 19: a typed label must be 13 letters / numbers (NapCore.acct); the phone sends ACCT.norm of it
+    var badTag = ports.filter(function (p) { return p.status === STATUS.AWT && String(p.tag_acct || '').trim() && !ACCT.valid(p.tag_acct); })
+      .map(function (p) { return 'P' + p.port + ': ' + ACCT.error(p.tag_acct); });
+    if (badTag.length) errors.push({ code: 'NAP_TAG_FORMAT', msg: 'Account label ' + badTag.join(' ') });
     if (!(a.photos >= 1)) errors.push({ code: 'NAP_PHOTO_REQUIRED', msg: 'At least one photo of the NAP reading is required.' });
     if (a.declaredFull) {
       var free = ports.filter(function (p) { return isUsable(p.status); }).map(function (p) { return 'P' + p.port; });
@@ -751,23 +802,18 @@
 
   // ======================================================================================================================
   // ---------- phase 11: DESK UPDATE of ports (nap-20, nap.desk_update_ports). Self-contained block; exported as NapCore.desk ----------
-  // Same rules as the server (change both together): the six statuses (never 'Unverified'); 'Active (w/ tagging)' needs EXACTLY 13 digits
-  // (spaces and dashes stripped); every other status sends no account number; reason 3..200 characters (trimmed); 1..8 distinct ports;
-  // ports whose status and account are unchanged are not sent.
+  // Same rules as the server (change both together): the six statuses (never 'Unverified'); 'Active (w/ tagging)' needs the account label:
+  // EXACTLY 13 letters / numbers (phase 19, NapCore.acct: spaces and dashes stripped, upper-cased); every other status sends no label;
+  // reason 3..200 characters (trimmed); 1..8 distinct ports; ports whose status and label are unchanged are not sent.
   var DESK = (function () {
-    var REASON_MIN = 3, REASON_MAX = 200, ACCT_LEN = 13;
-    // ' 1234-5678 90123 ' -> '1234567890123' (paste-friendly: spaces, tabs, dashes removed; anything else is kept so it fails the check)
-    function normAcct(s) { return String(s == null ? '' : s).replace(/[\s-]+/g, ''); }
-    function isAcct(s) { return /^[0-9]{13}$/.test(normAcct(s)); }
+    var REASON_MIN = 3, REASON_MAX = 200, ACCT_LEN = ACCT.LEN;
+    // ' abc-1234 567890 ' -> 'ABC1234567890' (paste-friendly: spaces, tabs, dashes removed, a-z upper-cased; anything else is kept so it fails)
+    function normAcct(s) { return ACCT.norm(s); }
+    function isAcct(s) { return ACCT.valid(s); }
     // '' when fine, else the message for one port {status, tag_acct}
     function portError(p) {
       if (!p || PORT_STATUSES.indexOf(p.status) < 0) return 'Choose a status.';
-      if (p.status === STATUS.AWT) {
-        var a = normAcct(p.tag_acct);
-        if (!a) return 'Enter the 13-digit account number.';
-        if (!/^[0-9]+$/.test(a)) return 'Digits only.';
-        if (a.length !== ACCT_LEN) return 'Exactly 13 digits (' + a.length + ' entered).';
-      }
+      if (p.status === STATUS.AWT) return ACCT.error(p.tag_acct);
       return '';
     }
     function reasonError(r) {
@@ -1149,7 +1195,7 @@
   // THE single source of the stage labels, colours and letters for the dashboard and the phone. Same rules as the server (change both
   // together): nap.stage_blocks_install = NOT_RFS / FOR_REHAB_REPAIR never installable (free 0); nap.stage_needs_audit = FOR_NAP_AUDIT first
   // in Aging; setting a FIRST stage = board + NAP technicians (stage_set_roles); changing / clearing one = admin / super with a reason
-  // (3..200); PDS mark = board + technicians (pds_mark_roles) on a port with a 13-digit account; PDS clear = admin / super with a reason.
+  // (3..200); PDS mark = board + technicians (pds_mark_roles) on a port with a 13-character account label (phase 19); PDS clear = admin / super with a reason.
   // Display: a NAP with a stage shows the STAGE as its primary status; the computed kind stays as the secondary field and in the filters.
   var P14 = (function () {
     var REASON_MIN = 3, REASON_MAX = 200, PORTS_PAGE = 100, PORTS_MAX = 500, BOX_STAGES_CHUNK = 1000;
@@ -1226,15 +1272,17 @@
       var x = o || {};
       return { client_id: x.clientId, box_id: x.boxId, stage: x.stage ? String(x.stage) : null, reason: reasonNorm(x.reason) || null };
     }
-    function acctDigits(s) { return str(s).replace(/[^0-9]/g, ''); }
-    function acctOk(s) { return /^[0-9]{13}$/.test(acctDigits(s)); }
-    // PDS on one port: '' when ok, else why not (mark: needs the 13-digit account; clear: admin + reason)
+    // phase 19: the comparison KEY of a stored label (letters and digits, upper-case; NapCore.acct.key). The name acctDigits is kept for the
+    // callers; for a label of digits and separators it is the same value as before.
+    function acctDigits(s) { return ACCT.key(s); }
+    function acctOk(s) { return ACCT.keyOk(s); }
+    // PDS on one port: '' when ok, else why not (mark: needs the 13-character account label; clear: admin + reason)
     function pdsError(port, on, note, r) {
       var p = port || {}, rr = r || {}, n = reasonNorm(note).length;
       if (n > REASON_MAX) return 'The note has at most ' + REASON_MAX + ' characters (' + n + ' entered).';
       if (on) {
         if (!rr.pdsMark) return 'You cannot mark PDS ports.';
-        if (!acctOk(p.tag_acct)) return 'Save the 13-digit account number of this port first.';
+        if (!acctOk(p.tag_acct)) return 'Save the 13-character account label (letters and numbers) of this port first.';
         return '';
       }
       if (!rr.pdsClear) return 'Only an admin can clear a PDS mark.';
@@ -1245,7 +1293,8 @@
       var x = o || {};
       return { client_id: x.clientId, box_id: x.boxId, np: Number(x.np), port: Number(x.port), pds: x.pds === true, note: reasonNorm(x.note) || null };
     }
-    // the PORT tab: filters -> nap.list_ports arguments; '' = no filter. Text: 13 digits (dashes / spaces ignored) = account, else stencil.
+    // the PORT tab: filters -> nap.list_ports arguments; '' = no filter. Text: an account label (NapCore.acct.query: 13 digits with or
+    // without spaces / dashes, or 13 letters / numbers without spaces) = account, else stencil.
     var PORT_STATUS_FILTERS = [STATUS.AWT, STATUS.AWO, STATUS.VACANT, STATUS.RELEASED, STATUS.HILOSS, STATUS.DEFECTIVE, STATUS.UNVERIFIED];
     function portsDefaults() { return { barangay: '', district: '', stage: '', pdsOnly: false, status: '', q: '' }; }
     function portsError(f) {
@@ -1253,13 +1302,13 @@
       if (x.stage && !filterOk(x.stage)) return 'Unknown stage filter.';
       if (x.status && PORT_STATUS_FILTERS.indexOf(x.status) < 0) return 'Unknown port status.';
       if (q.length > 80) return 'The search text has at most 80 characters.';
-      if (q && !acctOk(q) && q.replace(/\s+/g, '').length < 2) return 'Type at least 2 characters of the stencil, or a 13-digit account number.';
+      if (q && ACCT.query(q) == null && q.replace(/\s+/g, '').length < 2) return 'Type at least 2 characters of the stencil, or a 13-character account label.';
       return '';
     }
     function portsArgs(f, cursor, limit) {
-      var x = f || {}, c = cursor || null, q = str(x.q).trim();
+      var x = f || {}, c = cursor || null, q = str(x.q).trim(), aq = ACCT.query(q);
       return { p_barangay: x.barangay || null, p_district: x.district || null, p_stage: x.stage || null, p_pds_only: x.pdsOnly === true, p_status: x.status || null,
-               p_q: q ? (acctOk(q) ? acctDigits(q) : q) : null, p_limit: Math.max(1, Math.min(PORTS_MAX, Math.floor(Number(limit) || PORTS_PAGE))),
+               p_q: q ? (aq != null ? aq : q) : null, p_limit: Math.max(1, Math.min(PORTS_MAX, Math.floor(Number(limit) || PORTS_PAGE))),
                p_after_stencil: c ? c.stencil : null, p_after_np: c ? Number(c.np) : null, p_after_port: c ? Number(c.port) : null };
     }
     // the keyset cursor after a page (null = that was the last page)
@@ -1276,7 +1325,7 @@
       if (x.barangay) out.push(x.barangay);
       if (x.stage) out.push(x.stage === 'any' ? 'with a stage' : x.stage === 'none' ? 'without a stage' : 'Stage: ' + label(x.stage));
       if (x.status) out.push(x.status);
-      if (str(x.q).trim()) out.push((acctOk(x.q) ? 'account ' : 'stencil contains ') + '"' + str(x.q).trim() + '"');
+      if (str(x.q).trim()) out.push((ACCT.query(x.q) != null ? 'account ' : 'stencil contains ') + '"' + str(x.q).trim() + '"');
       return out.length ? out.join(' · ') : 'All ports';
     }
     // the phone audit form: the extra calls after a saved audit (never part of submit_audit), each with its own fresh client_id
@@ -1668,6 +1717,8 @@
 
   return {
     p18: P18,
+    // phase 19: the account label rule (nap-27)
+    acct: ACCT,
     p17: P17,
     p16: P16,
     p15: P15,
